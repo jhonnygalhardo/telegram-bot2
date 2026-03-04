@@ -1,19 +1,11 @@
+# salve como bot.py
 import asyncio
 import requests
 import json
 import os
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    MessageHandler,
-    filters
-)
-import time
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-# =========================
-# CONFIGURAÇÕES
-# =========================
 TELEGRAM_TOKEN = "SEU_TELEGRAM_TOKEN"
 CHAT_ID = "SEU_CHAT_ID"
 API_KEY = "SUA_API_KEY_BZZOIRO"
@@ -26,9 +18,6 @@ CHECK_INTERVAL = 5*60
 
 ALERTS_FILE = "alerted_matches.json"
 
-# =========================
-# ALERTAS SALVOS
-# =========================
 def carregar_alertas():
     if os.path.exists(ALERTS_FILE):
         with open(ALERTS_FILE, "r") as f:
@@ -39,9 +28,6 @@ def salvar_alertas(alerts):
     with open(ALERTS_FILE, "w") as f:
         json.dump(alerts, f)
 
-# =========================
-# OBTER JOGOS DO DIA
-# =========================
 def jogos_do_dia():
     headers = {"Authorization": f"Token {API_KEY}"}
     try:
@@ -57,9 +43,6 @@ def jogos_do_dia():
         print(f"Erro ao obter jogos do dia: {e}")
         return []
 
-# =========================
-# PREVISÃO DE PARTIDA
-# =========================
 def previsao_partida(match_id):
     headers = {"Authorization": f"Token {API_KEY}"}
     try:
@@ -69,9 +52,6 @@ def previsao_partida(match_id):
     except:
         return None
 
-# =========================
-# FORMATAR MENSAGEM
-# =========================
 def formatar_mensagem(nome_jogo, p):
     odds_casa = round(100 / (p['home_win_prob']*100), 2)
     odds_empate = round(100 / (p['draw_prob']*100), 2)
@@ -85,12 +65,9 @@ def formatar_mensagem(nome_jogo, p):
     )
     return texto
 
-# =========================
-# HANDLER CONSULTA POR NOME
-# =========================
 async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip().lower().replace("x", " ").replace("-", " ").replace("–", " ")
-    msg = " ".join(msg.split())  # remove espaços extras
+    msg = " ".join(msg.split())
 
     partidas = jogos_do_dia()
     match = None
@@ -116,9 +93,6 @@ async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     texto = formatar_mensagem(nome_jogo, p)
     await update.message.reply_text(texto)
 
-# =========================
-# ALERTAS EM TEMPO REAL
-# =========================
 async def enviar_alertas(app):
     alertas = carregar_alertas()
     partidas = jogos_do_dia()
@@ -155,15 +129,10 @@ async def enviar_alertas(app):
             ranking_msg += f"{i}. {nome_jogo} | Prob: {prob:.1f}% | Conf: {conf:.1f}%\n"
         await app.bot.send_message(chat_id=CHAT_ID, text=ranking_msg)
 
-# =========================
-# MAIN
-# =========================
 async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, consulta))
 
-    # Rodar o bot e os alertas juntos
     async def loop_alertas():
         while True:
             try:
@@ -173,7 +142,6 @@ async def main():
                 print(f"Erro no loop: {e}")
                 await asyncio.sleep(60)
 
-    # Start bot e loop paralelo
     await asyncio.gather(app.run_polling(), loop_alertas())
 
 if __name__ == "__main__":
