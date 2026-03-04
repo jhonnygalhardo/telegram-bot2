@@ -1,4 +1,3 @@
-# salve como bot.py
 import asyncio
 import requests
 import json
@@ -6,16 +5,15 @@ import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-TELEGRAM_TOKEN = "SEU_TELEGRAM_TOKEN"
-CHAT_ID = "SEU_CHAT_ID"
-API_KEY = "SUA_API_KEY_BZZOIRO"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+API_KEY = os.getenv("API_KEY_BZZOIRO")
 BASE_URL = "https://sports.bzzoiro.com/api/v1"
 
 MIN_PROB_VITORIA = 60
 MIN_CONFIANCA = 80
 CHANGE_THRESHOLD = 5
 CHECK_INTERVAL = 5*60
-
 ALERTS_FILE = "alerted_matches.json"
 
 def carregar_alertas():
