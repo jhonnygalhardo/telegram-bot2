@@ -1,24 +1,23 @@
-import requests
-from telegram import Bot, Update
-from telegram.ext import Updater, MessageHandler, Filters, CallbackContext
-import time
-import json
 import os
+import asyncio
+import requests
+import json
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 
 # =========================
 # CONFIGURAÇÕES
 # =========================
-TELEGRAM_TOKEN = "SEU_TELEGRAM_TOKEN"
-CHAT_ID = "SEU_CHAT_ID"
-API_KEY = "SUA_API_KEY_BZZOIRO"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = int(os.environ.get("CHAT_ID"))
+API_KEY = os.environ.get("API_KEY")
 BASE_URL = "https://sports.bzzoiro.com/api/v1"
 
-MIN_PROB_VITORIA = 60     # % mínima para alertas
-MIN_CONFIANCA = 80        # % mínima de confiança
-CHANGE_THRESHOLD = 5      # % de mudança significativa para alertas
-CHECK_INTERVAL = 5*60     # 5 minutos para alertas em tempo real
+MIN_PROB_VITORIA = 60
+MIN_CONFIANCA = 80
+CHANGE_THRESHOLD = 5
+CHECK_INTERVAL = 5*60  # 5 minutos
 
-bot = Bot(token=TELEGRAM_TOKEN)
 ALERTS_FILE = "alerted_matches.json"
 
 # =========================
@@ -78,9 +77,9 @@ def formatar_mensagem(nome_jogo, p):
     return texto
 
 # =========================
-# ENVIAR ALERTAS EM TEMPO REAL
+# ALERTAS AUTOMÁTICOS
 # =========================
-def enviar_alertas():
+async def enviar_alertas(app):
     alertas = carregar_alertas()
     partidas = jogos_do_dia()
     melhores_jogos = []
@@ -100,58 +99,59 @@ def enviar_alertas():
 
             if changed:
                 texto = formatar_mensagem(nome_jogo, p)
-                bot.send_message(chat_id=CHAT_ID, text=texto)
+                await app.bot.send_message(chat_id=CHAT_ID, text=texto)
                 alertas[key] = {"prob": max_prob, "conf": conf}
-                time.sleep(1)
+                await asyncio.sleep(1)
 
-            # Armazena para ranking
             melhores_jogos.append((max_prob, conf, nome_jogo, p))
 
     salvar_alertas(alertas)
 
-    # Ranking top 5 atualizado
     if melhores_jogos:
         melhores_jogos.sort(reverse=True, key=lambda x: (x[0], x[1]))
         top5 = melhores_jogos[:5]
         ranking_msg = "🏅 Top 5 Jogos Mais Confiáveis do Dia:\n\n"
         for i, (prob, conf, nome_jogo, _) in enumerate(top5, 1):
             ranking_msg += f"{i}. {nome_jogo} | Prob: {prob:.1f}% | Conf: {conf:.1f}%\n"
-        bot.send_message(chat_id=CHAT_ID, text=ranking_msg)
+        await app.bot.send_message(chat_id=CHAT_ID, text=ranking_msg)
 
 # =========================
-# CONSULTAS SOB DEMANDA
+# CONSULTA SOB DEMANDA
 # =========================
-def consulta(update: Update, context: CallbackContext):
+async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip()
     try:
         match_id, nome_jogo = msg.split(maxsplit=1)
     except ValueError:
-        update.message.reply_text("Envie no formato: <ID_PARTIDA> <Nome da Partida>")
+        await update.message.reply_text("Envie no formato: <ID_PARTIDA> <Nome da Partida>")
         return
     p = previsao_partida(match_id)
     if not p:
-        update.message.reply_text("Não foi possível obter a previsão.")
+        await update.message.reply_text("Não foi possível obter a previsão.")
         return
     texto = formatar_mensagem(nome_jogo, p)
-    update.message.reply_text(texto)
+    await update.message.reply_text(texto)
 
 # =========================
-# BOT TELEGRAM
+# INICIALIZAÇÃO DO BOT
 # =========================
-updater = Updater(TELEGRAM_TOKEN)
-dispatcher = updater.dispatcher
-dispatcher.add_handler(MessageHandler(Filters.text & ~Filters.command, consulta))
+async def main():
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, consulta))
 
-# =========================
-# LOOP PRINCIPAL EM TEMPO REAL
-# =========================
-if __name__ == "__main__":
-    updater.start_polling()
+    # Loop de alertas automáticos
+    async def loop_alertas():
+        while True:
+            try:
+                await enviar_alertas(app)
+            except Exception as e:
+                print(f"Erro no envio de alertas: {e}")
+            await asyncio.sleep(CHECK_INTERVAL)
+
+    asyncio.create_task(loop_alertas())
+
     print("Bot iniciado e rodando em tempo real...")
-    while True:
-        try:
-            enviar_alertas()
-            time.sleep(CHECK_INTERVAL)
-        except Exception as e:
-            print(f"Erro no loop: {e}")
-            time.sleep(60)
+    await app.run_polling()
+
+if __name__ == "__main__":
+    asyncio.run(main())
