@@ -3,7 +3,12 @@ import asyncio
 import json
 import os
 from telegram import Update
-from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 # =========================
 # CONFIGURAÇÕES
@@ -42,7 +47,8 @@ def jogos_do_dia():
         resp = requests.get(f"{BASE_URL}/matches/today", headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        partidas = [(str(m["id"]), f"{m['home_team']['name']} x {m['away_team']['name']}") for m in data["matches"]]
+        partidas = [(m["id"], f"{m['home_team']['name']} x {m['away_team']['name']}",
+                     m["home_team"]["name"], m["away_team"]["name"]) for m in data["matches"]]
         return partidas
     except requests.RequestException as e:
         print(f"Erro ao obter jogos do dia: {e}")
@@ -63,13 +69,12 @@ def previsao_partida(match_id):
 # =========================
 # FORMATAR MENSAGEM
 # =========================
-def formatar_mensagem(nome_jogo, p, match_id=None):
+def formatar_mensagem(nome_jogo, p):
     odds_casa = round(100 / (p['home_win_prob']*100), 2)
     odds_empate = round(100 / (p['draw_prob']*100), 2)
     odds_fora = round(100 / (p['away_win_prob']*100), 2)
     texto = (
-        f"⚽️ Previsão da Partida: {nome_jogo}\n"
-        f"🆔 ID da Partida: {match_id}\n\n"
+        f"⚽️ Previsão da Partida: {nome_jogo}\n\n"
         f"🏆 Vitória Casa: {p['home_win_prob']*100:.1f}% (Odds: {odds_casa})\n"
         f"🤝 Empate: {p['draw_prob']*100:.1f}% (Odds: {odds_empate})\n"
         f"🏆 Vitória Fora: {p['away_win_prob']*100:.1f}% (Odds: {odds_fora})\n"
@@ -85,7 +90,7 @@ async def enviar_alertas(app):
     partidas = jogos_do_dia()
     melhores_jogos = []
 
-    for match_id, nome_jogo in partidas:
+    for match_id, nome_jogo, home, away in partidas:
         p = previsao_partida(match_id)
         if not p:
             continue
@@ -96,10 +101,11 @@ async def enviar_alertas(app):
         if max_prob >= MIN_PROB_VITORIA and conf >= MIN_CONFIANCA:
             key = str(match_id)
             last_sent = alertas.get(key, {})
-            changed = (not last_sent or abs(last_sent.get("prob",0)-max_prob) >= CHANGE_THRESHOLD or abs(last_sent.get("conf",0)-conf) >= CHANGE_THRESHOLD)
+            changed = (not last_sent or abs(last_sent.get("prob",0)-max_prob) >= CHANGE_THRESHOLD
+                       or abs(last_sent.get("conf",0)-conf) >= CHANGE_THRESHOLD)
 
             if changed:
-                texto = formatar_mensagem(nome_jogo, p, match_id)
+                texto = formatar_mensagem(nome_jogo, p)
                 await app.bot.send_message(chat_id=CHAT_ID, text=texto)
                 alertas[key] = {"prob": max_prob, "conf": conf}
                 await asyncio.sleep(1)
@@ -119,49 +125,51 @@ async def enviar_alertas(app):
         await app.bot.send_message(chat_id=CHAT_ID, text=ranking_msg)
 
 # =========================
-# CONSULTAS SOB DEMANDA PELO NOME DO TIME
+# CONSULTA PELO NOME DOS TIMES
 # =========================
 async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = update.message.text.strip().lower()
     partidas = jogos_do_dia()
-
-    partida_encontrada = None
-    for id, nome in partidas:
-        if all(time in nome.lower() for time in msg.split()):
-            partida_encontrada = (id, nome)
+    match = None
+    for match_id, nome_jogo, home, away in partidas:
+        if msg in home.lower() and msg in away.lower():
+            match = (match_id, nome_jogo)
+            break
+        if all(t.lower() in nome_jogo.lower() for t in msg.split()):
+            match = (match_id, nome_jogo)
             break
 
-    if not partida_encontrada:
-        await update.message.reply_text("Não encontrei a partida. Digite pelo menos um time do jogo.")
+    if not match:
+        await update.message.reply_text("Não foi possível encontrar a partida pelo nome. Use ambos os times, ex: Palmeiras Novorizontino")
         return
 
-    match_id, nome_jogo = partida_encontrada
+    match_id, nome_jogo = match
     p = previsao_partida(match_id)
     if not p:
         await update.message.reply_text("Não foi possível obter a previsão.")
         return
 
-    texto = formatar_mensagem(nome_jogo, p, match_id)
+    texto = formatar_mensagem(nome_jogo, p)
     await update.message.reply_text(texto)
 
 # =========================
-# MAIN - BOT TELEGRAM
+# LOOP PRINCIPAL
 # =========================
+async def alert_loop(app):
+    while True:
+        try:
+            await enviar_alertas(app)
+        except Exception as e:
+            print(f"Erro no loop de alertas: {e}")
+        await asyncio.sleep(CHECK_INTERVAL)
+
 async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), consulta))
 
-    # Rodar alerta automático em loop paralelo
-    async def loop_alertas():
-        while True:
-            try:
-                await enviar_alertas(app)
-                await asyncio.sleep(CHECK_INTERVAL)
-            except Exception as e:
-                print(f"Erro no loop: {e}")
-                await asyncio.sleep(60)
+    # Inicia loop de alertas
+    asyncio.create_task(alert_loop(app))
 
-    asyncio.create_task(loop_alertas())
     print("Bot iniciado e rodando em tempo real...")
     await app.run_polling()
 
