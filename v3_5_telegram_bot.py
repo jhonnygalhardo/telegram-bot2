@@ -3,7 +3,7 @@ import asyncio
 import requests
 import json
 from telegram import Update
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 
 # =========================
 # CONFIGURAÇÕES
@@ -21,7 +21,7 @@ CHECK_INTERVAL = 5*60  # 5 minutos
 ALERTS_FILE = "alerted_matches.json"
 
 # =========================
-# ARMAZENAR ALERTAS ENVIADOS
+# ARMAZENAR ALERTAS
 # =========================
 def carregar_alertas():
     if os.path.exists(ALERTS_FILE):
@@ -34,7 +34,7 @@ def salvar_alertas(alerts):
         json.dump(alerts, f)
 
 # =========================
-# OBTER JOGOS DO DIA
+# OBTER JOGOS
 # =========================
 def jogos_do_dia():
     headers = {"Authorization": f"Token {API_KEY}", "Accept": "application/json"}
@@ -49,7 +49,7 @@ def jogos_do_dia():
         return []
 
 # =========================
-# OBTER PREVISÃO DE PARTIDA
+# OBTER PREVISÃO
 # =========================
 def previsao_partida(match_id):
     headers = {"Authorization": f"Token {API_KEY}", "Accept": "application/json"}
@@ -67,14 +67,30 @@ def formatar_mensagem(nome_jogo, p):
     odds_casa = round(100 / (p['home_win_prob']*100), 2)
     odds_empate = round(100 / (p['draw_prob']*100), 2)
     odds_fora = round(100 / (p['away_win_prob']*100), 2)
-    texto = (
+    return (
         f"⚽️ Previsão da Partida: {nome_jogo}\n\n"
         f"🏆 Vitória Casa: {p['home_win_prob']*100:.1f}% (Odds: {odds_casa})\n"
         f"🤝 Empate: {p['draw_prob']*100:.1f}% (Odds: {odds_empate})\n"
         f"🏆 Vitória Fora: {p['away_win_prob']*100:.1f}% (Odds: {odds_fora})\n"
         f"🔎 Nível de Confiança: {p['confidence_score']*100:.1f}%"
     )
-    return texto
+
+# =========================
+# CONSULTA SOB DEMANDA
+# =========================
+async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message.text.strip()
+    try:
+        match_id, nome_jogo = msg.split(maxsplit=1)
+    except ValueError:
+        await update.message.reply_text("Envie no formato: <ID_PARTIDA> <Nome da Partida>")
+        return
+    p = previsao_partida(match_id)
+    if not p:
+        await update.message.reply_text("Não foi possível obter a previsão.")
+        return
+    texto = formatar_mensagem(nome_jogo, p)
+    await update.message.reply_text(texto)
 
 # =========================
 # ALERTAS AUTOMÁTICOS
@@ -116,30 +132,13 @@ async def enviar_alertas(app):
         await app.bot.send_message(chat_id=CHAT_ID, text=ranking_msg)
 
 # =========================
-# CONSULTA SOB DEMANDA
-# =========================
-async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message.text.strip()
-    try:
-        match_id, nome_jogo = msg.split(maxsplit=1)
-    except ValueError:
-        await update.message.reply_text("Envie no formato: <ID_PARTIDA> <Nome da Partida>")
-        return
-    p = previsao_partida(match_id)
-    if not p:
-        await update.message.reply_text("Não foi possível obter a previsão.")
-        return
-    texto = formatar_mensagem(nome_jogo, p)
-    await update.message.reply_text(texto)
-
-# =========================
-# INICIALIZAÇÃO DO BOT
+# FUNÇÃO PRINCIPAL
 # =========================
 async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, consulta))
 
-    # Loop de alertas automáticos
+    # Loop de alertas
     async def loop_alertas():
         while True:
             try:
