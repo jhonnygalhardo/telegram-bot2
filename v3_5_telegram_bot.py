@@ -1,21 +1,30 @@
+# v3_6_telegram_bot.py
 import asyncio
 import requests
 import json
 import os
-from telegram import Update
+from telegram import Bot, Update
 from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, filters
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("CHAT_ID")
-API_KEY = os.getenv("API_KEY_BZZOIRO")
+# =========================
+# CONFIGURAÇÕES
+# =========================
+TELEGRAM_TOKEN = "SEU_TELEGRAM_TOKEN"
+CHAT_ID = "SEU_CHAT_ID"
+API_KEY = "SUA_API_KEY_BZZOIRO"
 BASE_URL = "https://sports.bzzoiro.com/api/v1"
 
-MIN_PROB_VITORIA = 60
-MIN_CONFIANCA = 80
-CHANGE_THRESHOLD = 5
-CHECK_INTERVAL = 5*60
-ALERTS_FILE = "alerted_matches.json"
+MIN_PROB_VITORIA = 60     # % mínima para alertas
+MIN_CONFIANCA = 80        # % mínima de confiança
+CHANGE_THRESHOLD = 5      # % de mudança significativa para alertas
+CHECK_INTERVAL = 5 * 60   # 5 minutos
 
+ALERTS_FILE = "alerted_matches.json"
+bot = Bot(token=TELEGRAM_TOKEN)
+
+# =========================
+# ARMAZENAR ALERTAS ENVIADOS
+# =========================
 def carregar_alertas():
     if os.path.exists(ALERTS_FILE):
         with open(ALERTS_FILE, "r") as f:
@@ -26,30 +35,48 @@ def salvar_alertas(alerts):
     with open(ALERTS_FILE, "w") as f:
         json.dump(alerts, f)
 
+# =========================
+# OBTER JOGOS DO DIA
+# =========================
 def jogos_do_dia():
-    headers = {"Authorization": f"Token {API_KEY}"}
+    headers = {"Authorization": f"Token {API_KEY}", "Accept": "application/json"}
     try:
         resp = requests.get(f"{BASE_URL}/matches/today", headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        partidas = []
-        for m in data["matches"]:
-            nome_jogo = f"{m['home_team']['name']} x {m['away_team']['name']}"
-            partidas.append((m["id"], nome_jogo, m['home_team']['name'], m['away_team']['name']))
+        partidas = [(m["id"], f"{m['home_team']['name']} x {m['away_team']['name']}") for m in data["matches"]]
         return partidas
-    except Exception as e:
+    except requests.RequestException as e:
         print(f"Erro ao obter jogos do dia: {e}")
         return []
 
+# =========================
+# OBTER PREVISÃO DE PARTIDA
+# =========================
 def previsao_partida(match_id):
-    headers = {"Authorization": f"Token {API_KEY}"}
+    headers = {"Authorization": f"Token {API_KEY}", "Accept": "application/json"}
     try:
         resp = requests.get(f"{BASE_URL}/predictions/matches/{match_id}", headers=headers, timeout=10)
         resp.raise_for_status()
         return resp.json()["predictions"]
-    except:
+    except Exception as e:
+        print(f"Erro ao obter previsão do jogo {match_id}: {e}")
         return None
 
+# =========================
+# ENCONTRAR JOGO PELO NOME
+# =========================
+def encontrar_jogo_por_nome(texto):
+    texto = texto.lower().strip()
+    partidas = jogos_do_dia()
+    for match_id, nome_jogo in partidas:
+        if all(time.lower() in nome_jogo.lower() for time in texto.split()):
+            return match_id, nome_jogo
+    return None, None
+
+# =========================
+# FORMATAR MENSAGEM
+# =========================
 def formatar_mensagem(nome_jogo, p):
     odds_casa = round(100 / (p['home_win_prob']*100), 2)
     odds_empate = round(100 / (p['draw_prob']*100), 2)
@@ -63,40 +90,15 @@ def formatar_mensagem(nome_jogo, p):
     )
     return texto
 
-async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message.text.strip().lower().replace("x", " ").replace("-", " ").replace("–", " ")
-    msg = " ".join(msg.split())
-
-    partidas = jogos_do_dia()
-    match = None
-    for match_id, nome_jogo, home, away in partidas:
-        nome_clean = nome_jogo.lower().replace("x", " ").replace("-", " ").replace("–", " ")
-        nome_clean = " ".join(nome_clean.split())
-        if all(t in nome_clean for t in msg.split()):
-            match = (match_id, nome_jogo)
-            break
-
-    if not match:
-        await update.message.reply_text(
-            "Não foi possível encontrar a partida. Use ambos os times, ex: Palmeiras Novorizontino"
-        )
-        return
-
-    match_id, nome_jogo = match
-    p = previsao_partida(match_id)
-    if not p:
-        await update.message.reply_text("Não foi possível obter a previsão.")
-        return
-
-    texto = formatar_mensagem(nome_jogo, p)
-    await update.message.reply_text(texto)
-
-async def enviar_alertas(app):
+# =========================
+# ALERTAS EM TEMPO REAL
+# =========================
+async def enviar_alertas():
     alertas = carregar_alertas()
     partidas = jogos_do_dia()
     melhores_jogos = []
 
-    for match_id, nome_jogo, home, away in partidas:
+    for match_id, nome_jogo in partidas:
         p = previsao_partida(match_id)
         if not p:
             continue
@@ -111,36 +113,63 @@ async def enviar_alertas(app):
 
             if changed:
                 texto = formatar_mensagem(nome_jogo, p)
-                await app.bot.send_message(chat_id=CHAT_ID, text=texto)
+                await bot.send_message(chat_id=CHAT_ID, text=texto)
                 alertas[key] = {"prob": max_prob, "conf": conf}
-                await asyncio.sleep(1)
 
+            # Ranking top 5
             melhores_jogos.append((max_prob, conf, nome_jogo, p))
 
     salvar_alertas(alertas)
 
+    # Ranking top 5 atualizado
     if melhores_jogos:
         melhores_jogos.sort(reverse=True, key=lambda x: (x[0], x[1]))
         top5 = melhores_jogos[:5]
         ranking_msg = "🏅 Top 5 Jogos Mais Confiáveis do Dia:\n\n"
         for i, (prob, conf, nome_jogo, _) in enumerate(top5, 1):
             ranking_msg += f"{i}. {nome_jogo} | Prob: {prob:.1f}% | Conf: {conf:.1f}%\n"
-        await app.bot.send_message(chat_id=CHAT_ID, text=ranking_msg)
+        await bot.send_message(chat_id=CHAT_ID, text=ranking_msg)
 
+# =========================
+# CONSULTA SOB DEMANDA
+# =========================
+async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message.text.strip()
+    match_id, nome_jogo = encontrar_jogo_por_nome(msg)
+    if not match_id:
+        await update.message.reply_text("Jogo não encontrado. Tente colocar os nomes dos times exatos.")
+        return
+    p = previsao_partida(match_id)
+    if not p:
+        await update.message.reply_text("Não foi possível obter a previsão.")
+        return
+    texto = formatar_mensagem(nome_jogo, p)
+    await update.message.reply_text(texto)
+
+# =========================
+# LOOP PRINCIPAL
+# =========================
 async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, consulta))
+    # Inicia o bot
+    await app.initialize()
+    await app.start()
+    print("Bot iniciado e rodando em tempo real...")
 
-    async def loop_alertas():
+    # Loop de alertas
+    try:
         while True:
-            try:
-                await enviar_alertas(app)
-                await asyncio.sleep(CHECK_INTERVAL)
-            except Exception as e:
-                print(f"Erro no loop: {e}")
-                await asyncio.sleep(60)
+            await enviar_alertas()
+            await asyncio.sleep(CHECK_INTERVAL)
+    except asyncio.CancelledError:
+        print("Loop de alertas cancelado.")
+    finally:
+        await app.stop()
+        await app.shutdown()
 
-    await asyncio.gather(app.run_polling(), loop_alertas())
-
+# =========================
+# EXECUÇÃO
+# =========================
 if __name__ == "__main__":
     asyncio.run(main())
