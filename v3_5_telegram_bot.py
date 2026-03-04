@@ -1,5 +1,5 @@
-import requests
 import asyncio
+import requests
 import json
 import os
 from telegram import Update
@@ -7,8 +7,9 @@ from telegram.ext import (
     ApplicationBuilder,
     ContextTypes,
     MessageHandler,
-    filters,
+    filters
 )
+import time
 
 # =========================
 # CONFIGURAÇÕES
@@ -18,15 +19,15 @@ CHAT_ID = "SEU_CHAT_ID"
 API_KEY = "SUA_API_KEY_BZZOIRO"
 BASE_URL = "https://sports.bzzoiro.com/api/v1"
 
-MIN_PROB_VITORIA = 60     # % mínima para alertas
-MIN_CONFIANCA = 80        # % mínima de confiança
-CHANGE_THRESHOLD = 5      # % de mudança significativa para alertas
-CHECK_INTERVAL = 5*60     # 5 minutos
+MIN_PROB_VITORIA = 60
+MIN_CONFIANCA = 80
+CHANGE_THRESHOLD = 5
+CHECK_INTERVAL = 5*60
 
 ALERTS_FILE = "alerted_matches.json"
 
 # =========================
-# ARMAZENAR ALERTAS ENVIADOS
+# ALERTAS SALVOS
 # =========================
 def carregar_alertas():
     if os.path.exists(ALERTS_FILE):
@@ -42,23 +43,25 @@ def salvar_alertas(alerts):
 # OBTER JOGOS DO DIA
 # =========================
 def jogos_do_dia():
-    headers = {"Authorization": f"Token {API_KEY}", "Accept": "application/json"}
+    headers = {"Authorization": f"Token {API_KEY}"}
     try:
         resp = requests.get(f"{BASE_URL}/matches/today", headers=headers, timeout=10)
         resp.raise_for_status()
         data = resp.json()
-        partidas = [(m["id"], f"{m['home_team']['name']} x {m['away_team']['name']}",
-                     m["home_team"]["name"], m["away_team"]["name"]) for m in data["matches"]]
+        partidas = []
+        for m in data["matches"]:
+            nome_jogo = f"{m['home_team']['name']} x {m['away_team']['name']}"
+            partidas.append((m["id"], nome_jogo, m['home_team']['name'], m['away_team']['name']))
         return partidas
-    except requests.RequestException as e:
+    except Exception as e:
         print(f"Erro ao obter jogos do dia: {e}")
         return []
 
 # =========================
-# OBTER PREVISÃO DE PARTIDA
+# PREVISÃO DE PARTIDA
 # =========================
 def previsao_partida(match_id):
-    headers = {"Authorization": f"Token {API_KEY}", "Accept": "application/json"}
+    headers = {"Authorization": f"Token {API_KEY}"}
     try:
         resp = requests.get(f"{BASE_URL}/predictions/matches/{match_id}", headers=headers, timeout=10)
         resp.raise_for_status()
@@ -83,7 +86,38 @@ def formatar_mensagem(nome_jogo, p):
     return texto
 
 # =========================
-# ENVIAR ALERTAS EM TEMPO REAL
+# HANDLER CONSULTA POR NOME
+# =========================
+async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = update.message.text.strip().lower().replace("x", " ").replace("-", " ").replace("–", " ")
+    msg = " ".join(msg.split())  # remove espaços extras
+
+    partidas = jogos_do_dia()
+    match = None
+    for match_id, nome_jogo, home, away in partidas:
+        nome_clean = nome_jogo.lower().replace("x", " ").replace("-", " ").replace("–", " ")
+        nome_clean = " ".join(nome_clean.split())
+        if all(t in nome_clean for t in msg.split()):
+            match = (match_id, nome_jogo)
+            break
+
+    if not match:
+        await update.message.reply_text(
+            "Não foi possível encontrar a partida. Use ambos os times, ex: Palmeiras Novorizontino"
+        )
+        return
+
+    match_id, nome_jogo = match
+    p = previsao_partida(match_id)
+    if not p:
+        await update.message.reply_text("Não foi possível obter a previsão.")
+        return
+
+    texto = formatar_mensagem(nome_jogo, p)
+    await update.message.reply_text(texto)
+
+# =========================
+# ALERTAS EM TEMPO REAL
 # =========================
 async def enviar_alertas(app):
     alertas = carregar_alertas()
@@ -101,8 +135,7 @@ async def enviar_alertas(app):
         if max_prob >= MIN_PROB_VITORIA and conf >= MIN_CONFIANCA:
             key = str(match_id)
             last_sent = alertas.get(key, {})
-            changed = (not last_sent or abs(last_sent.get("prob",0)-max_prob) >= CHANGE_THRESHOLD
-                       or abs(last_sent.get("conf",0)-conf) >= CHANGE_THRESHOLD)
+            changed = (not last_sent or abs(last_sent.get("prob",0)-max_prob) >= CHANGE_THRESHOLD or abs(last_sent.get("conf",0)-conf) >= CHANGE_THRESHOLD)
 
             if changed:
                 texto = formatar_mensagem(nome_jogo, p)
@@ -110,12 +143,10 @@ async def enviar_alertas(app):
                 alertas[key] = {"prob": max_prob, "conf": conf}
                 await asyncio.sleep(1)
 
-            # Armazena para ranking
             melhores_jogos.append((max_prob, conf, nome_jogo, p))
 
     salvar_alertas(alertas)
 
-    # Ranking top 5 atualizado
     if melhores_jogos:
         melhores_jogos.sort(reverse=True, key=lambda x: (x[0], x[1]))
         top5 = melhores_jogos[:5]
@@ -125,53 +156,25 @@ async def enviar_alertas(app):
         await app.bot.send_message(chat_id=CHAT_ID, text=ranking_msg)
 
 # =========================
-# CONSULTA PELO NOME DOS TIMES
+# MAIN
 # =========================
-async def consulta(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    msg = update.message.text.strip().lower()
-    partidas = jogos_do_dia()
-    match = None
-    for match_id, nome_jogo, home, away in partidas:
-        if msg in home.lower() and msg in away.lower():
-            match = (match_id, nome_jogo)
-            break
-        if all(t.lower() in nome_jogo.lower() for t in msg.split()):
-            match = (match_id, nome_jogo)
-            break
-
-    if not match:
-        await update.message.reply_text("Não foi possível encontrar a partida pelo nome. Use ambos os times, ex: Palmeiras Novorizontino")
-        return
-
-    match_id, nome_jogo = match
-    p = previsao_partida(match_id)
-    if not p:
-        await update.message.reply_text("Não foi possível obter a previsão.")
-        return
-
-    texto = formatar_mensagem(nome_jogo, p)
-    await update.message.reply_text(texto)
-
-# =========================
-# LOOP PRINCIPAL
-# =========================
-async def alert_loop(app):
-    while True:
-        try:
-            await enviar_alertas(app)
-        except Exception as e:
-            print(f"Erro no loop de alertas: {e}")
-        await asyncio.sleep(CHECK_INTERVAL)
-
 async def main():
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & (~filters.COMMAND), consulta))
 
-    # Inicia loop de alertas
-    asyncio.create_task(alert_loop(app))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, consulta))
 
-    print("Bot iniciado e rodando em tempo real...")
-    await app.run_polling()
+    # Rodar o bot e os alertas juntos
+    async def loop_alertas():
+        while True:
+            try:
+                await enviar_alertas(app)
+                await asyncio.sleep(CHECK_INTERVAL)
+            except Exception as e:
+                print(f"Erro no loop: {e}")
+                await asyncio.sleep(60)
+
+    # Start bot e loop paralelo
+    await asyncio.gather(app.run_polling(), loop_alertas())
 
 if __name__ == "__main__":
     asyncio.run(main())
